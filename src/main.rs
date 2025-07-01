@@ -1,6 +1,9 @@
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::{self, EnvFilter};
+use tokio::process::Command;
+use std::collections::HashMap;
+use std::borrow::Cow;
 
 ///// Counter
 use std::sync::Arc;
@@ -14,8 +17,10 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::Parameters},
     model::*,
     schemars,
-    service::RequestContext,
+    service::{RequestContext, RunningService},
+    RoleClient,
     tool, tool_handler, tool_router,
+    transport::{ConfigureCommandExt, TokioChildProcess},
 };
 
 struct MCPServer {
@@ -30,76 +35,37 @@ pub struct StructRequest {
     pub b: i32,
 }
 
+// FIXME: maybe this shouldn't be cloneable??
 #[derive(Clone)]
-pub struct Counter {
+pub struct MCPMux {
+    // FIXME: remove this
     counter: Arc<Mutex<i32>>,
-    tool_router: ToolRouter<Counter>,
+
+    // TODO: maybe merge the fields into a single MCPService struct??
+    tools : HashMap<String, Vec<Tool>>,
+    clients : HashMap<String, Arc<RunningService<RoleClient, ()>>>,
+    tool_router: ToolRouter<MCPMux>,
 }
 
 #[tool_router]
-impl Counter {
+impl MCPMux {
     #[allow(dead_code)]
-    pub fn new() -> Self {
+    pub fn new(tools : HashMap<String, Vec<Tool>>,
+        clients : HashMap<String, Arc<RunningService<RoleClient, ()>>>) -> Self {
         Self {
             counter: Arc::new(Mutex::new(0)),
             tool_router: Self::tool_router(),
+            tools : tools,
+            clients : clients,
         }
     }
 
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
         RawResource::new(uri, name.to_string()).no_annotation()
     }
-
-    #[tool(description = "Increment the counter by 1")]
-    async fn increment(&self) -> Result<CallToolResult, McpError> {
-        let mut counter = self.counter.lock().await;
-        *counter += 1;
-        Ok(CallToolResult::success(vec![Content::text(
-            counter.to_string(),
-        )]))
-    }
-
-    #[tool(description = "Decrement the counter by 1")]
-    async fn decrement(&self) -> Result<CallToolResult, McpError> {
-        let mut counter = self.counter.lock().await;
-        *counter -= 1;
-        Ok(CallToolResult::success(vec![Content::text(
-            counter.to_string(),
-        )]))
-    }
-
-    #[tool(description = "Get the current counter value")]
-    async fn get_value(&self) -> Result<CallToolResult, McpError> {
-        let counter = self.counter.lock().await;
-        Ok(CallToolResult::success(vec![Content::text(
-            counter.to_string(),
-        )]))
-    }
-
-    #[tool(description = "Say hello to the client")]
-    fn say_hello(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text("hello")]))
-    }
-
-    #[tool(description = "Repeat what you say")]
-    fn echo(&self, Parameters(object): Parameters<JsonObject>) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::Value::Object(object).to_string(),
-        )]))
-    }
-
-    #[tool(description = "Calculate the sum of two numbers")]
-    fn sum(
-        &self,
-        Parameters(StructRequest { a, b }): Parameters<StructRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(
-            (a + b).to_string(),
-        )]))
-    }
 }
-#[tool_handler]
-impl ServerHandler for Counter {
+
+impl ServerHandler for MCPMux {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
@@ -211,6 +177,69 @@ impl ServerHandler for Counter {
         })
     }
 
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut aggregated = Vec::new();
+        for (server_name, server_tools) in &self.tools {
+            for tool in server_tools {
+                let mut new_tool = tool.clone();
+                new_tool.name = Cow::Owned(format!("{server_name}::{}", tool.name));
+                aggregated.push(new_tool);
+            }
+        }
+        Ok(ListToolsResult { tools : aggregated, next_cursor: None, })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut parts = request.name.splitn(2, "::");
+        let maybe_server = parts.next();
+        let maybe_tool = parts.next();
+
+        // FIXME: should we return ErrorData instead?
+        if maybe_server.is_none() || maybe_tool.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text("error parsing tool identifier")]));
+        }
+
+        let server_name = maybe_server.unwrap();
+        let tool_name = maybe_tool.unwrap();
+
+        // Check that the tool exists
+        if let Some(server_tools) = self.tools.get(server_name) {
+            if !server_tools.iter().any(|t| t.name == tool_name) {
+                return Ok(CallToolResult::error(vec![Content::text(format!("unknown tool {}", tool_name))]));
+            }
+        } else {
+            return Ok(CallToolResult::error(vec![Content::text("unknown server")]));
+        }
+
+        assert!(self.clients.contains_key(server_name));
+        let client = self.clients.get(server_name).unwrap();
+
+        let mut new_request = request.clone();
+        new_request.name = tool_name.to_string().into();
+        match client.call_tool(new_request).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("failed to use tool {}", e),
+                            None)),
+        }
+
+
+        //match request.name.as_ref() {
+        //}
+        //Ok(CallToolResult::success(vec![
+                //Content::text(request.name),
+        //]))
+    }
+
     async fn initialize(
         &self,
         _request: InitializeRequestParam,
@@ -235,10 +264,36 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
+    // name -> server
+    let mut servers = HashMap::new();
+    // name -> client
+    let mut clients = HashMap::new();
+    // name -> tools
+    let mut tools = HashMap::new();
+
+    servers.insert("mycounter",
+        MCPServer {
+            cmd: "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio".to_string(),
+            args: vec![],
+        });
+
+    for (name, server) in &servers {
+        let client = ()
+        .serve(TokioChildProcess::new(Command::new(server.cmd.clone()).configure(
+            |cmd| { cmd.args(server.args.clone()); },
+        ))?)
+        .await?;
+        let server_info = client.peer_info();
+        tracing::info!("Connected to {name:#?}: {server_info:#?}");
+        let list_result = client.list_tools(Default::default()).await?;
+        tools.insert(name.to_string(), list_result.tools);
+        clients.insert(name.to_string(), Arc::new(client));
+    }
+
     tracing::info!("Starting MCP server");
 
     // Create an instance of our counter router
-    let service = Counter::new().serve(stdio()).await.inspect_err(|e| {
+    let service = MCPMux::new(tools, clients).serve(stdio()).await.inspect_err(|e| {
         tracing::error!("serving error: {:?}", e); 
     })?;
 
