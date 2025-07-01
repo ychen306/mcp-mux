@@ -17,16 +17,44 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::Parameters},
     model::*,
     schemars,
-    service::{RequestContext, RunningService},
+    service::{RequestContext, RunningService, ServiceError},
     RoleClient,
     tool, tool_handler, tool_router,
-    transport::{ConfigureCommandExt, TokioChildProcess},
+    transport::{ConfigureCommandExt, TokioChildProcess, SseClientTransport},
 };
 
 #[derive(Deserialize)]
-pub struct MCPServer {
-    pub cmd: String,
-    pub args: Vec<String>,
+pub enum MCPTransport {
+    // TODO: maybe renamed to SubProcess or something
+    Stdio { cmd: String, args: Vec<String> },
+    SSE(String),
+}
+
+enum MuxClient {
+    Stdio(RunningService<RoleClient, ()>),
+    SSE(RunningService<RoleClient, rmcp::model::InitializeRequestParam>)
+}
+
+async fn call_tool(mc : &MuxClient, request : CallToolRequestParam) -> Result<CallToolResult, ServiceError> {
+    match mc {
+        MuxClient::Stdio(client) => client.call_tool(request).await,
+        MuxClient::SSE(client) => client.call_tool(request).await,
+    }
+}
+
+fn peer_info(mc : &MuxClient) -> Option<&ServerInfo> {
+    match mc {
+        MuxClient::Stdio(client) => client.peer_info(),
+        MuxClient::SSE(client) => client.peer_info(),
+    }
+
+}
+
+async fn list_tools(mc : &MuxClient) -> Result<ListToolsResult, ServiceError> {
+    match mc {
+        MuxClient::Stdio(client) => client.list_tools(Default::default()).await,
+        MuxClient::SSE(client) => client.list_tools(Default::default()).await,
+    }
 }
 
 // FIXME: maybe this shouldn't be cloneable??
@@ -34,7 +62,7 @@ pub struct MCPServer {
 pub struct MCPMux {
     // TODO: maybe merge the fields into a single MCPService struct??
     tools : HashMap<String, Vec<Tool>>,
-    clients : HashMap<String, Arc<RunningService<RoleClient, ()>>>,
+    clients : HashMap<String, Arc<MuxClient>>,
     tool_router: ToolRouter<MCPMux>,
 }
 
@@ -42,7 +70,7 @@ pub struct MCPMux {
 impl MCPMux {
     #[allow(dead_code)]
     pub fn new(tools : HashMap<String, Vec<Tool>>,
-        clients : HashMap<String, Arc<RunningService<RoleClient, ()>>>) -> Self {
+        clients : HashMap<String, Arc<MuxClient>>) -> Self {
         Self {
             tool_router: Self::tool_router(),
             tools : tools,
@@ -111,7 +139,7 @@ impl ServerHandler for MCPMux {
 
         let mut new_request = request.clone();
         new_request.name = tool_name.to_string().into();
-        match client.call_tool(new_request).await {
+        match call_tool(client, new_request).await {
             Ok(result) => Ok(result),
             Err(e) => Err(ErrorData::new(
                             ErrorCode::INTERNAL_ERROR,
@@ -134,21 +162,46 @@ impl ServerHandler for MCPMux {
     }
 }
 
-pub async fn build_mux(servers : &HashMap<String, MCPServer>) -> Result<MCPMux> {
+async fn build_client(transport : &MCPTransport) -> Result<MuxClient> {
+    match transport {
+        MCPTransport::Stdio{cmd, args} => {
+            let client = ()
+                .serve(TokioChildProcess::new(Command::new(cmd.clone()).configure(
+                            |cmd| { cmd.args(args.clone()); },
+                ))?)
+                .await?;
+            return Ok(MuxClient::Stdio(client));
+        }
+        MCPTransport::SSE(uri) => {
+            let transport = SseClientTransport::start(Arc::<str>::from(uri.to_string())).await?;
+            // TODO: make this an argument chosen by the user
+            let client_info = ClientInfo {
+                protocol_version: Default::default(),
+                capabilities: ClientCapabilities::default(),
+                client_info: Implementation {
+                    name: "test sse client".to_string(),
+                    version: "0.0.1".to_string(),
+                },
+            };
+            let client = client_info.serve(transport).await.inspect_err(|e| {
+                tracing::error!("client error: {:?}", e);
+            })?;
+            return Ok(MuxClient::SSE(client));
+        }
+    }
+}
+
+pub async fn build_mux(servers : &HashMap<String, MCPTransport>) -> Result<MCPMux> {
     // name -> client
     let mut clients = HashMap::new();
     // name -> tools
     let mut tools = HashMap::new();
 
-    for (name, server) in servers {
-        let client = ()
-            .serve(TokioChildProcess::new(Command::new(server.cmd.clone()).configure(
-                        |cmd| { cmd.args(server.args.clone()); },
-            ))?)
-            .await?;
-        let server_info = client.peer_info();
+    for (name, transport) in servers {
+        let client = build_client(transport).await?;
+        let server_info = peer_info(&client);
         tracing::info!("Connected to {name:#?}: {server_info:#?}");
-        let list_result = client.list_tools(Default::default()).await?;
+        let list_result = list_tools(&client).await?;
         tools.insert(name.to_string(), list_result.tools);
         clients.insert(name.to_string(), Arc::new(client));
     }

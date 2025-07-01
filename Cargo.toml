@@ -9,6 +9,7 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "mai
     "transport-sse-server",
     "transport-io",
     "transport-streamable-http-server",
+    "transport-sse-client",
     "client",
     "reqwest",
     "transport-child-process",
