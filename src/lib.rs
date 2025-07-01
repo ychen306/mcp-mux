@@ -1,26 +1,25 @@
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};
-use tracing_subscriber::{self, EnvFilter};
-use tokio::process::Command;
-use std::collections::HashMap;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use tokio::process::Command;
+use tracing_subscriber::{self, EnvFilter};
 
 ///// Counter
-use std::sync::Arc;
 use serde_json::json;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
 
 use rmcp::{
-    Error as McpError, RoleServer, ServerHandler,
+    Error as McpError, RoleClient, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::Parameters},
     model::*,
     schemars,
     service::{RequestContext, RunningService, ServiceError},
-    RoleClient,
     tool, tool_handler, tool_router,
-    transport::{ConfigureCommandExt, TokioChildProcess, SseClientTransport},
+    transport::{ConfigureCommandExt, SseClientTransport, TokioChildProcess},
 };
 
 #[derive(Deserialize)]
@@ -32,25 +31,27 @@ pub enum MCPTransport {
 
 enum MuxClient {
     Stdio(RunningService<RoleClient, ()>),
-    SSE(RunningService<RoleClient, rmcp::model::InitializeRequestParam>)
+    SSE(RunningService<RoleClient, rmcp::model::InitializeRequestParam>),
 }
 
-async fn call_tool(mc : &MuxClient, request : CallToolRequestParam) -> Result<CallToolResult, ServiceError> {
+async fn call_tool(
+    mc: &MuxClient,
+    request: CallToolRequestParam,
+) -> Result<CallToolResult, ServiceError> {
     match mc {
         MuxClient::Stdio(client) => client.call_tool(request).await,
         MuxClient::SSE(client) => client.call_tool(request).await,
     }
 }
 
-fn peer_info(mc : &MuxClient) -> Option<&ServerInfo> {
+fn peer_info(mc: &MuxClient) -> Option<&ServerInfo> {
     match mc {
         MuxClient::Stdio(client) => client.peer_info(),
         MuxClient::SSE(client) => client.peer_info(),
     }
-
 }
 
-async fn list_tools(mc : &MuxClient) -> Result<ListToolsResult, ServiceError> {
+async fn list_tools(mc: &MuxClient) -> Result<ListToolsResult, ServiceError> {
     match mc {
         MuxClient::Stdio(client) => client.list_tools(Default::default()).await,
         MuxClient::SSE(client) => client.list_tools(Default::default()).await,
@@ -61,20 +62,22 @@ async fn list_tools(mc : &MuxClient) -> Result<ListToolsResult, ServiceError> {
 #[derive(Clone)]
 pub struct MCPMux {
     // TODO: maybe merge the fields into a single MCPService struct??
-    tools : HashMap<String, Vec<Tool>>,
-    clients : HashMap<String, Arc<MuxClient>>,
+    tools: HashMap<String, Vec<Tool>>,
+    clients: HashMap<String, Arc<MuxClient>>,
     tool_router: ToolRouter<MCPMux>,
 }
 
 #[tool_router]
 impl MCPMux {
     #[allow(dead_code)]
-    pub fn new(tools : HashMap<String, Vec<Tool>>,
-        clients : HashMap<String, Arc<MuxClient>>) -> Self {
+    pub fn new(
+        tools: HashMap<String, Vec<Tool>>,
+        clients: HashMap<String, Arc<MuxClient>>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            tools : tools,
-            clients : clients,
+            tools: tools,
+            clients: clients,
         }
     }
 }
@@ -83,14 +86,11 @@ impl ServerHandler for MCPMux {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             instructions: Some("this is a mux".to_string()),
         }
     }
-
 
     async fn list_tools(
         &self,
@@ -105,7 +105,10 @@ impl ServerHandler for MCPMux {
                 aggregated.push(new_tool);
             }
         }
-        Ok(ListToolsResult { tools : aggregated, next_cursor: None, })
+        Ok(ListToolsResult {
+            tools: aggregated,
+            next_cursor: None,
+        })
     }
 
     async fn call_tool(
@@ -119,7 +122,9 @@ impl ServerHandler for MCPMux {
 
         // FIXME: should we return ErrorData instead?
         if maybe_server.is_none() || maybe_tool.is_none() {
-            return Ok(CallToolResult::error(vec![Content::text("error parsing tool identifier")]));
+            return Ok(CallToolResult::error(vec![Content::text(
+                "error parsing tool identifier",
+            )]));
         }
 
         let server_name = maybe_server.unwrap();
@@ -128,7 +133,10 @@ impl ServerHandler for MCPMux {
         // Check that the tool exists
         if let Some(server_tools) = self.tools.get(server_name) {
             if !server_tools.iter().any(|t| t.name == tool_name) {
-                return Ok(CallToolResult::error(vec![Content::text(format!("unknown tool {}", tool_name))]));
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "unknown tool {}",
+                    tool_name
+                ))]));
             }
         } else {
             return Ok(CallToolResult::error(vec![Content::text("unknown server")]));
@@ -142,9 +150,10 @@ impl ServerHandler for MCPMux {
         match call_tool(client, new_request).await {
             Ok(result) => Ok(result),
             Err(e) => Err(ErrorData::new(
-                            ErrorCode::INTERNAL_ERROR,
-                            format!("failed to use tool {}", e),
-                            None)),
+                ErrorCode::INTERNAL_ERROR,
+                format!("failed to use tool {}", e),
+                None,
+            )),
         }
     }
 
@@ -162,13 +171,15 @@ impl ServerHandler for MCPMux {
     }
 }
 
-async fn build_client(transport : &MCPTransport) -> Result<MuxClient> {
+async fn build_client(transport: &MCPTransport) -> Result<MuxClient> {
     match transport {
-        MCPTransport::Stdio{cmd, args} => {
+        MCPTransport::Stdio { cmd, args } => {
             let client = ()
-                .serve(TokioChildProcess::new(Command::new(cmd.clone()).configure(
-                            |cmd| { cmd.args(args.clone()); },
-                ))?)
+                .serve(TokioChildProcess::new(
+                    Command::new(cmd.clone()).configure(|cmd| {
+                        cmd.args(args.clone());
+                    }),
+                )?)
                 .await?;
             return Ok(MuxClient::Stdio(client));
         }
@@ -191,7 +202,7 @@ async fn build_client(transport : &MCPTransport) -> Result<MuxClient> {
     }
 }
 
-pub async fn build_mux(servers : &HashMap<String, MCPTransport>) -> Result<MCPMux> {
+pub async fn build_mux(servers: &HashMap<String, MCPTransport>) -> Result<MCPMux> {
     // name -> client
     let mut clients = HashMap::new();
     // name -> tools
