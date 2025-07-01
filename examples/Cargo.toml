@@ -1,0 +1,47 @@
+[package]
+name = "mcp-mux-example"
+version = "0.1.0"
+publish = false
+
+[dependencies]
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = [
+    "server",
+    "transport-sse-server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "client",
+    "reqwest",
+    "transport-child-process",
+    "tower",
+    "auth"
+] }
+mcp_mux = { path = "../" }
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "io-std",
+    "signal",
+    "process"
+] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "std",
+    "fmt",
+] }
+futures = "0.3"
+rand = { version = "0.9", features = ["std"] }
+axum = { version = "0.8", features = ["macros"] }
+schemars = { version = "0.8", optional = true }
+reqwest = { version = "0.12", features = ["json"] }
+chrono = "0.4"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_urlencoded = "0.7"
+serde_json = "1.0"
+askama = { version = "0.14" }
+tower-http = { version = "0.6", features = ["cors"] }
+hyper = { version = "1" }
+hyper-util = { version = "0", features = ["server"] }
