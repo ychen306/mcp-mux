@@ -23,6 +23,7 @@ use rmcp::{
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
 
+#[derive(Deserialize)]
 pub struct MCPServer {
     pub cmd: String,
     pub args: Vec<String>,

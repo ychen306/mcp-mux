@@ -4,14 +4,9 @@ use tracing_subscriber::{self, EnvFilter};
 use tokio::process::Command;
 use std::collections::HashMap;
 use std::borrow::Cow;
-
-///// Counter
 use std::sync::Arc;
 use serde_json::json;
-use tokio::sync::Mutex;
-
 use serde::Deserialize;
-
 use rmcp::{
     Error as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::Parameters},
@@ -22,11 +17,30 @@ use rmcp::{
     tool, tool_handler, tool_router,
     transport::{ConfigureCommandExt, TokioChildProcess},
 };
+use std::fs;
+use std::env;
 
 use mcp_mux::{MCPMux, MCPServer, build_mux};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let filename = env::args().nth(1).expect("Usage: mux <servers.json>");
+    // Example servers.json:
+    // ```
+    // {
+    //   "counter": {
+    //     "cmd": "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio",
+    //     "args": []
+    //   },
+    //   "another": {
+    //     "cmd": "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio",
+    //     "args": []
+    //   }
+    // }
+    // ```
+    let content = fs::read_to_string(filename)?;
+    let servers: HashMap<String, MCPServer> = serde_json::from_str(&content)?;
+
     // Initialize the tracing subscriber with file and stdout logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
@@ -34,35 +48,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let mut servers = HashMap::new();
-
-    servers.insert("mycounter".to_string(),
-        MCPServer {
-            cmd: "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio".to_string(),
-            args: vec![],
-        });
-    servers.insert("another-counter".to_string(),
-        MCPServer {
-            cmd: "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio".to_string(),
-            args: vec![],
-        });
-
-    /*
-    for (name, server) in &servers {
-        let client = ()
-        .serve(TokioChildProcess::new(Command::new(server.cmd.clone()).configure(
-            |cmd| { cmd.args(server.args.clone()); },
-        ))?)
-        .await?;
-        let server_info = client.peer_info();
-        tracing::info!("Connected to {name:#?}: {server_info:#?}");
-        let list_result = client.list_tools(Default::default()).await?;
-        tools.insert(name.to_string(), list_result.tools);
-        clients.insert(name.to_string(), Arc::new(client));
-    }
-
     tracing::info!("Starting MCP server");
-    */
     let mux = build_mux(&servers).await?;
 
     // Create an instance of our counter router
