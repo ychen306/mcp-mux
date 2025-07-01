@@ -23,35 +23,21 @@ use mcp_mux::{MCPMux, MCPTransport, build_mux};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    //let filename = env::args().nth(1).expect("Usage: mux <servers.json>");
-    //// Example servers.json:
-    //// ```
-    //// {
-    ////   "counter": {
-    ////     "cmd": "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio",
-    ////     "args": []
-    ////   },
-    ////   "another": {
-    ////     "cmd": "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio",
-    ////     "args": []
-    ////   }
-    //// }
-    //// ```
-    //let content = fs::read_to_string(filename)?;
-    //let servers: HashMap<String, MCPTransport> = serde_json::from_str(&content)?;
-    let mut servers = HashMap::new();
-    servers.insert(
-        "counter1".to_string(),
-        MCPTransport::Stdio {
-            cmd: "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio"
-                .to_string(),
-            args: vec![],
-        },
-    );
-    servers.insert(
-        "sse-counter".to_string(),
-        MCPTransport::SSE("http://localhost:8000/sse".to_string()),
-    );
+    let filename = env::args().nth(1).expect("Usage: mux <servers.json>");
+    // Example servers.json:
+    // ```
+    // {
+    //   "counter": {
+    //     "Stdio" : {
+    //       "cmd": "/Users/tom/workspace/mcp-rust-sdk/target/debug/examples/servers_counter_stdio",
+    //       "args": []
+    //     }
+    //   },
+    //   "counter2": {"SSE": "http://localhost:8000/sse"}
+    // }
+    // ```
+    let content = fs::read_to_string(filename)?;
+    let servers: HashMap<String, MCPTransport> = serde_json::from_str(&content)?;
 
     // Initialize the tracing subscriber with file and stdout logging
     tracing_subscriber::fmt()
